@@ -147,6 +147,10 @@ func (r *RedisFairLock) IsExistHashKey() (bool, error) {
 	return false, nil
 }
 
+func (r *RedisFairLock) Close() error {
+	return r.redisClient.Close()
+}
+
 func (r *RedisFairLock) lockInner(leaseTimeMs int64) error {
 	goroutineId := utils.GetGoroutineId()
 
