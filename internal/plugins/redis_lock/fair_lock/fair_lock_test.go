@@ -1,8 +1,8 @@
 package fair_lock
 
 import (
-	"distributed-lock/pkg/utils"
 	"errors"
+	"github.com/noahyz/distributed_lock/pkg/utils"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"sync"

@@ -1,8 +1,8 @@
 package api
 
 import (
-	"distributed-lock/internal/plugins/redis_lock/fair_lock"
 	"fmt"
+	"github.com/noahyz/distributed_lock/internal/plugins/redis_lock/fair_lock"
 	"github.com/redis/go-redis/v9"
 )
 

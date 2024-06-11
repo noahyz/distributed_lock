@@ -1,4 +1,4 @@
-module distributed-lock
+module github.com/noahyz/distributed_lock
 
 go 1.18
 

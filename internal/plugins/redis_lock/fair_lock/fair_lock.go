@@ -2,10 +2,10 @@ package fair_lock
 
 import (
 	"context"
-	"distributed-lock/pkg/utils"
 	_ "embed"
 	"errors"
 	"fmt"
+	"github.com/noahyz/distributed_lock/pkg/utils"
 	cmap "github.com/orcaman/concurrent-map"
 	"github.com/redis/go-redis/v9"
 	"time"
