@@ -3,8 +3,9 @@ module github.com/noahyz/distributed_lock
 go 1.18
 
 require (
+	github.com/go-redis/redis/v7 v7.4.1
 	github.com/orcaman/concurrent-map v1.0.0
-	github.com/redis/go-redis/v9 v9.5.1
+	github.com/redis/go-redis/v9 v9.5.3
 	github.com/satori/go.uuid v1.2.0
 	github.com/stretchr/testify v1.6.1
 	github.com/v2pro/plz v0.0.0-20221028024117-e5f9aec5b631

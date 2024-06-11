@@ -1,7 +1,10 @@
 package fair_lock
 
 import (
+	"context"
 	"errors"
+	"github.com/noahyz/distributed_lock/api/database"
+	"github.com/noahyz/distributed_lock/api/option"
 	"github.com/noahyz/distributed_lock/pkg/utils"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
@@ -10,14 +13,127 @@ import (
 	"time"
 )
 
+/**
+封装 redis 的客户端
+*/
+
+type RedisClient struct {
+	client *redis.Client
+}
+
+func NewRedisClient(client *redis.Client) *RedisClient {
+	return &RedisClient{
+		client: client,
+	}
+}
+
+func (r *RedisClient) Ping(ctx context.Context) (string, error) {
+	pong, err := r.client.Ping(ctx).Result()
+	if err != nil {
+		return "", err
+	}
+	return pong, nil
+}
+
+func (r *RedisClient) Eval(ctx context.Context, script string, keys []string,
+	args ...interface{}) (interface{}, error) {
+	return r.client.Eval(ctx, script, keys, args...).Result()
+}
+
+func (r *RedisClient) LRange(ctx context.Context, key string, start, stop int64) ([]string, error) {
+	return r.client.LRange(ctx, key, start, stop).Result()
+}
+
+func (r *RedisClient) ZRangeWithScores(ctx context.Context, key string, start, stop int64) (map[string]float64, error) {
+	memberScores, err := r.client.ZRangeWithScores(ctx, key, start, stop).Result()
+	if err != nil {
+		return make(map[string]float64), err
+	}
+	result := make(map[string]float64, len(memberScores))
+	for _, ms := range memberScores {
+		if member, ok := ms.Member.(string); ok {
+			result[member] = ms.Score
+		}
+	}
+	return result, nil
+}
+
+func (r *RedisClient) Exists(ctx context.Context, keys ...string) (bool, error) {
+	result, err := r.client.Exists(ctx, keys...).Result()
+	if err != nil {
+		return false, err
+	}
+	if result > 0 {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (r *RedisClient) Subscribe(ctx context.Context, channels ...string) database.WrapPubSub {
+	pubSub := r.client.Subscribe(ctx, channels...)
+	return NewPubSub(pubSub)
+}
+
+func (r *RedisClient) Close() error {
+	return r.client.Close()
+}
+
+// PubSub 包装 redis 的发布订阅
+type PubSub struct {
+	redisPubSub *redis.PubSub
+	msgChannel  chan string
+	ctx         context.Context
+	cancel      context.CancelFunc
+}
+
+func NewPubSub(redisPubSub *redis.PubSub) *PubSub {
+	result := &PubSub{
+		redisPubSub: redisPubSub,
+		msgChannel:  make(chan string, 100),
+	}
+	result.ctx, result.cancel = context.WithCancel(context.Background())
+	return result
+}
+
+func (r *PubSub) Unsubscribe(ctx context.Context, channels ...string) error {
+	return r.redisPubSub.Unsubscribe(ctx, channels...)
+}
+
+func (r *PubSub) Channel() <-chan string {
+	rawChannel := r.redisPubSub.Channel()
+	go func(ctx context.Context) {
+		for {
+			select {
+			case msg := <-rawChannel:
+				r.msgChannel <- msg.String()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}(r.ctx)
+	return r.msgChannel
+}
+
+func (r *PubSub) Close() error {
+	err := r.redisPubSub.Close()
+	r.cancel()
+	return err
+}
+
+/**
+开始测试
+*/
+
 func getRedisFairLockClient(t *testing.T, lockName string) *RedisFairLock {
 	t.Helper()
-	redisClient := redis.NewClient(&redis.Options{
+	client := redis.NewClient(&redis.Options{
 		Addr:     "127.0.0.1:6379",
 		Password: "123",
 		DB:       0,
 	})
-	redisFairLock := NewFairLock(redisClient, lockName)
+	redisClient := NewRedisClient(client)
+	redisFairLock, err := NewFairLock(redisClient, lockName)
+	require.Nil(t, err, "NewFairLock failed")
 	require.NotNilf(t, redisFairLock, "NewFairLock failed")
 	return redisFairLock
 }
@@ -29,7 +145,7 @@ func TestLock(t *testing.T) {
 	defer redisFairLock.Close()
 
 	// 加锁 & 解锁
-	leaseTimeMsOption := WithLockLeaseTimeMs(5000)
+	leaseTimeMsOption := option.WithLockLeaseTimeMs(5000)
 	if err := redisFairLock.Lock(leaseTimeMsOption); err != nil {
 		t.Errorf("lock err: %v\n", err)
 		return
@@ -52,8 +168,8 @@ func TestTryLock(t *testing.T) {
 	defer redisFairLock.Close()
 
 	// 尝试加锁 & 解锁
-	leaseTimeMsOption := WithTryLockLeaseTimeMs(5000)
-	waitTimeMsOption := WithTryLockWaitTimeMs(5000)
+	leaseTimeMsOption := option.WithTryLockLeaseTimeMs(5000)
+	waitTimeMsOption := option.WithTryLockWaitTimeMs(5000)
 	if err := redisFairLock.TryLock(leaseTimeMsOption, waitTimeMsOption); err != nil {
 		t.Errorf("tryLock err: %v\n", err)
 		return
@@ -97,7 +213,7 @@ func TestMultipleLocks(t *testing.T) {
 	for i := 0; i < 500; i++ {
 		wg2.Add(1)
 		go func() {
-			leaseTimeMsOption := WithLockLeaseTimeMs(5000)
+			leaseTimeMsOption := option.WithLockLeaseTimeMs(5000)
 			if err := redisFairLock.Lock(leaseTimeMsOption); err != nil {
 				t.Errorf("lock err: %v", err)
 				t.FailNow()
@@ -157,7 +273,7 @@ func TestTryLockNonDelayed(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		t.Logf("goroutine: %v, start tryLock(wait: 0ms)", utils.GetGoroutineId())
-		waitTimeMsOption := WithTryLockWaitTimeMs(0)
+		waitTimeMsOption := option.WithTryLockWaitTimeMs(0)
 		if err := redisFairLock.TryLock(waitTimeMsOption); err != nil {
 			t.Errorf("tryLock err: %v", err)
 			return
@@ -177,7 +293,7 @@ func TestTryLockNonDelayed(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		t.Logf("goroutine: %v, start tryLock(wait: 200ms)", utils.GetGoroutineId())
-		waitTimeMsOption := WithTryLockWaitTimeMs(200)
+		waitTimeMsOption := option.WithTryLockWaitTimeMs(200)
 		err := redisFairLock.TryLock(waitTimeMsOption)
 		// 这里一定会加锁失败，并且返回错误应该是: ErrorNotObtained
 		if err != nil {
@@ -201,7 +317,7 @@ func TestTryLockNonDelayed(t *testing.T) {
 	wg.Wait()
 
 	t.Logf("goroutine: %v, start tryLock(wait: 0ms)", utils.GetGoroutineId())
-	waitTimeMsOption := WithTryLockWaitTimeMs(0)
+	waitTimeMsOption := option.WithTryLockWaitTimeMs(0)
 	err := redisFairLock.TryLock(waitTimeMsOption)
 	// 这里应该加锁失败，并且返回操作应该是: ErrorNotObtained
 	if err != nil {
@@ -234,8 +350,8 @@ func TestWaitTimeoutDrift(t *testing.T) {
 	executor := utils.NewGoroutinePool(3)
 	for i := 0; i < 50; i++ {
 		executor.Submit(func() {
-			waitMs := WithTryLockWaitTimeMs(500)
-			leaseMs := WithTryLockLeaseTimeMs(leaseTimeMs)
+			waitMs := option.WithTryLockWaitTimeMs(500)
+			leaseMs := option.WithTryLockLeaseTimeMs(leaseTimeMs)
 			if err := redisFairLock.TryLock(waitMs, leaseMs); err == nil {
 				t.Logf("goroutine: %v, lock success", utils.GetGoroutineId())
 				time.Sleep(10 * time.Second)
@@ -251,8 +367,8 @@ func TestWaitTimeoutDrift(t *testing.T) {
 	timeoutSet, err := redisFairLock.GetTimeoutSetData()
 	require.NoErrorf(t, err, "GetTimeoutSetData failed")
 	nowTimeMs := time.Now().UnixMilli()
-	for _, item := range timeoutSet {
-		t.Logf("item: %v expire: %vms", item.Member, int64(item.Score)-nowTimeMs)
+	for member, score := range timeoutSet {
+		t.Logf("item: %v expire: %vms", member, int64(score)-nowTimeMs)
 	}
 
 	// 现在再启动一个任务，并在他超时失败之前 kill 他，
@@ -260,8 +376,8 @@ func TestWaitTimeoutDrift(t *testing.T) {
 	executor.Submit(func() {
 		t.Logf("Final goroutine trying to take the lock with goroutine id: %v", utils.GetGoroutineId())
 		lastGoroutineTryingToLockStatus = true
-		waitMs := WithTryLockWaitTimeMs(30000)
-		leaseMs := WithTryLockLeaseTimeMs(30000)
+		waitMs := option.WithTryLockWaitTimeMs(30000)
+		leaseMs := option.WithTryLockLeaseTimeMs(30000)
 		err = redisFairLock.TryLock(waitMs, leaseMs)
 		if err == nil {
 			t.Logf("Lock taken by final goroutine: %v", utils.GetGoroutineId())
@@ -287,9 +403,9 @@ func TestWaitTimeoutDrift(t *testing.T) {
 	timeoutSet, err = redisFairLock.GetTimeoutSetData()
 	require.NoErrorf(t, err, "GetTimeoutSetData failed")
 	nowTimeMs = time.Now().UnixMilli()
-	for _, item := range timeoutSet {
-		expireMs := int64(item.Score) - nowTimeMs
-		t.Logf("item: %v, expire : %vms", item.Member, expireMs)
+	for member, score := range timeoutSet {
+		expireMs := int64(score) - nowTimeMs
+		t.Logf("item: %v, expire : %vms", member, expireMs)
 		// 实现中 300000 毫秒是默认的协程等待时间
 		if expireMs > leaseTimeMs+300000 {
 			t.Errorf("It would take more than %vms to get the lock", leaseTimeMs)
@@ -311,8 +427,8 @@ func TestLockAcquiredTimeoutDrift(t *testing.T) {
 		currIndex := i
 		executor.Submit(func() {
 			t.Logf("running %v in goroutineId: %v", currIndex, utils.GetGoroutineId())
-			waitMs := WithTryLockWaitTimeMs(3000)
-			leaseMs := WithTryLockLeaseTimeMs(leaseTimeMs)
+			waitMs := option.WithTryLockWaitTimeMs(3000)
+			leaseMs := option.WithTryLockLeaseTimeMs(leaseTimeMs)
 			err := redisFairLock.TryLock(waitMs, leaseMs)
 			if err == nil {
 				t.Logf("Lock taken by goroutine: %v", utils.GetGoroutineId())
@@ -328,8 +444,8 @@ func TestLockAcquiredTimeoutDrift(t *testing.T) {
 	executor.Submit(func() {
 		t.Logf("Final goroutine trying to take the lock with goroutineId: %v", utils.GetGoroutineId())
 		lastGoroutineTryingToLock = true
-		waitMs := WithTryLockWaitTimeMs(30000)
-		leaseMs := WithTryLockLeaseTimeMs(30000)
+		waitMs := option.WithTryLockWaitTimeMs(30000)
+		leaseMs := option.WithTryLockLeaseTimeMs(30000)
 		err := redisFairLock.TryLock(waitMs, leaseMs)
 		if err == nil {
 			time.Sleep(1 * time.Second)
@@ -351,9 +467,9 @@ func TestLockAcquiredTimeoutDrift(t *testing.T) {
 	timeoutSet, err := redisFairLock.GetTimeoutSetData()
 	require.NoErrorf(t, err, "GetTimeoutSetData failed")
 	nowTimeMs := time.Now().UnixMilli()
-	for _, item := range timeoutSet {
-		expireMs := int64(item.Score) - nowTimeMs
-		t.Logf("item: %v, expire : %vms", item.Member, expireMs)
+	for member, score := range timeoutSet {
+		expireMs := int64(score) - nowTimeMs
+		t.Logf("item: %v, expire : %vms", member, expireMs)
 		// 实现中 300000 毫秒是默认的协程等待时间
 		if expireMs > leaseTimeMs+300000 {
 			t.Errorf("It would take more than %vms to get the lock", leaseTimeMs)
@@ -380,7 +496,7 @@ func TestExpire(t *testing.T) {
 	defer redisFairLock.Close()
 
 	// 设置锁过期时间为 2 秒
-	waitMs := WithLockLeaseTimeMs(2000)
+	waitMs := option.WithLockLeaseTimeMs(2000)
 	err := redisFairLock.Lock(waitMs)
 	require.NoErrorf(t, err, "Lock failed")
 

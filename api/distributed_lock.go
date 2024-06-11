@@ -1,15 +1,19 @@
 package api
 
 import (
-	"fmt"
+	"github.com/noahyz/distributed_lock/api/database"
+	"github.com/noahyz/distributed_lock/api/option"
 	"github.com/noahyz/distributed_lock/internal/plugins/redis_lock/fair_lock"
-	"github.com/redis/go-redis/v9"
 )
 
-func NewFairLockByRedis(lockName string, redisClient *redis.Client) (*fair_lock.RedisFairLock, error) {
-	if err := checkRedisStatus(redisClient); err != nil {
-		return nil, fmt.Errorf("redis not available, err: %v", err)
-	}
-	fairLock := fair_lock.NewFairLock(redisClient, lockName)
-	return fairLock, nil
+type DistributedLock interface {
+	Lock(param ...option.LockParamOption) error
+	TryLock(param ...option.TryLockParamOption) error
+	Unlock() error
+	ForceUnlock()
+	IsLocked() bool
+}
+
+func NewFairLockByRedis(lockName string, redisClient database.WrapRedisClient) (DistributedLock, error) {
+	return fair_lock.NewFairLock(redisClient, lockName)
 }

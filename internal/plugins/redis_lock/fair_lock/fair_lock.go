@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"github.com/noahyz/distributed_lock/api/database"
+	"github.com/noahyz/distributed_lock/api/option"
 	"github.com/noahyz/distributed_lock/pkg/utils"
 	cmap "github.com/orcaman/concurrent-map"
 	"github.com/redis/go-redis/v9"
@@ -23,12 +25,6 @@ var (
 	//go:embed script/renewal.lua
 	renewalLockLuaScript string
 
-	acquireLua      = redis.NewScript(acquireLockLuaScript)
-	tryAcquireLua   = redis.NewScript(tryAcquireLockLuaScript)
-	releaseLua      = redis.NewScript(releaseLockLuaScript)
-	forceReleaseLua = redis.NewScript(forceReleaseLockLuaScript)
-	renewalLua      = redis.NewScript(renewalLockLuaScript)
-
 	ErrorNotObtained = errors.New("redis lock: not obtained")
 )
 
@@ -42,7 +38,7 @@ const (
 
 type RedisFairLock struct {
 	// redis 客户端
-	redisClient *redis.Client
+	redisClient database.WrapRedisClient
 	// 锁的名字
 	fairLockName string
 	// 锁续期时间（过期时间）
@@ -61,26 +57,38 @@ type RedisFairLock struct {
 	keyHashName string
 }
 
-func NewFairLock(redisClient *redis.Client, fairLockName string, opts ...FairLockOption) *RedisFairLock {
+func NewFairLock(
+	redisClient database.WrapRedisClient,
+	fairLockName string,
+	opts ...option.FairLockParamOption) (*RedisFairLock, error) {
+	// 检查 redis 连通性
+	if _, err := redisClient.Ping(context.Background()); err != nil {
+		return nil, err
+	}
+	// 获取参数
+	param := option.FairLockParam{
+		GoroutineWaitTimeMs: defaultGoroutineWaitTimeMs,
+	}
+	for _, opt := range opts {
+		opt(&param)
+	}
+	// 构建对象，返回
 	fairLock := &RedisFairLock{
 		redisClient:         redisClient,
 		fairLockName:        fairLockName,
 		lockLeaseTimeMs:     defaultWatchDogTimeoutMs,
-		goroutineWaitTimeMs: defaultGoroutineWaitTimeMs,
+		goroutineWaitTimeMs: param.GoroutineWaitTimeMs,
 		goroutineQueueName:  getGoroutineQueueName(fairLockName),
 		timeoutSetName:      getTimeoutSetName(fairLockName),
 		uuid:                utils.GetUUID(),
 		renewMap:            cmap.New(),
 		keyHashName:         getKeyHashName(fairLockName),
 	}
-	for _, opt := range opts {
-		opt(fairLock)
-	}
-	return fairLock
+	return fairLock, nil
 }
 
-func (r *RedisFairLock) Lock(opts ...LockParamOption) error {
-	param := &LockParam{
+func (r *RedisFairLock) Lock(opts ...option.LockParamOption) error {
+	param := &option.LockParam{
 		LeaseTimeMs: -1,
 	}
 	for _, opt := range opts {
@@ -89,8 +97,8 @@ func (r *RedisFairLock) Lock(opts ...LockParamOption) error {
 	return r.lockInner(param.LeaseTimeMs)
 }
 
-func (r *RedisFairLock) TryLock(opts ...TryLockParamOption) error {
-	param := &TryLockParam{
+func (r *RedisFairLock) TryLock(opts ...option.TryLockParamOption) error {
+	param := &option.TryLockParam{
 		LeaseTimeMs: -1,
 		WaitTimeMs:  0,
 	}
@@ -128,23 +136,16 @@ func (r *RedisFairLock) IsLocked() bool {
 // GetGoroutineQueueData 获取当前协程等待队列中的数据，用于调试
 func (r *RedisFairLock) GetGoroutineQueueData() ([]string, error) {
 	key := getGoroutineQueueName(r.fairLockName)
-	return r.redisClient.LRange(context.Background(), key, 0, -1).Result()
+	return r.redisClient.LRange(context.Background(), key, 0, -1)
 }
 
-func (r *RedisFairLock) GetTimeoutSetData() ([]redis.Z, error) {
+func (r *RedisFairLock) GetTimeoutSetData() (map[string]float64, error) {
 	key := getTimeoutSetName(r.fairLockName)
-	return r.redisClient.ZRangeWithScores(context.Background(), key, 0, -1).Result()
+	return r.redisClient.ZRangeWithScores(context.Background(), key, 0, -1)
 }
 
 func (r *RedisFairLock) IsExistHashKey() (bool, error) {
-	res, err := r.redisClient.Exists(context.Background(), r.keyHashName).Result()
-	if err != nil {
-		return false, err
-	}
-	if res > 0 {
-		return true, nil
-	}
-	return false, nil
+	return r.redisClient.Exists(context.Background(), r.keyHashName)
 }
 
 func (r *RedisFairLock) Close() error {
@@ -312,9 +313,9 @@ func (r *RedisFairLock) tryAcquireInner(waitTimeMs int64, leaseTimeMs int64, gor
 // 返回值说明: [是否加锁成功，加锁失败情况下当前协程或这把锁的过期时间，错误]
 func (r *RedisFairLock) runAcquireLockLuaScript(
 	lockGoroutineName string, leaseTimeMs, goroutineWaitTimeMs, currTimeMs int64) (bool, int64, error) {
-	result, err := acquireLua.Run(context.Background(), r.redisClient,
-		[]string{r.keyHashName, r.goroutineQueueName, r.timeoutSetName},
-		lockGoroutineName, leaseTimeMs, goroutineWaitTimeMs, currTimeMs).Result()
+	keys := []string{r.keyHashName, r.goroutineQueueName, r.timeoutSetName}
+	args := []interface{}{lockGoroutineName, leaseTimeMs, goroutineWaitTimeMs, currTimeMs}
+	result, err := r.redisClient.Eval(context.Background(), acquireLockLuaScript, keys, args...)
 	if err != nil {
 		// 加锁成功
 		if errors.Is(err, redis.Nil) {
@@ -334,9 +335,9 @@ func (r *RedisFairLock) runOnceAcquireLockLuaScript(
 	if leaseTimeMs <= 0 {
 		leaseTimeMs = r.lockLeaseTimeMs
 	}
-	_, err := tryAcquireLua.Run(context.Background(), r.redisClient,
-		[]string{r.keyHashName, r.goroutineQueueName, r.timeoutSetName},
-		lockGoroutineName, leaseTimeMs, goroutineWaitTimeMs, currTimeMs).Result()
+	keys := []string{r.keyHashName, r.goroutineQueueName, r.timeoutSetName}
+	args := []interface{}{lockGoroutineName, leaseTimeMs, goroutineWaitTimeMs, currTimeMs}
+	_, err := r.redisClient.Eval(context.Background(), tryAcquireLockLuaScript, keys, args...)
 	if err != nil {
 		// 加锁成功
 		if errors.Is(err, redis.Nil) {
@@ -389,7 +390,9 @@ func (r *RedisFairLock) renewExpirationSchedulerGoroutine(cancel context.Context
 
 func (r *RedisFairLock) renewExpiration(goroutineId int64) (int64, error) {
 	// 返回 1 表示续期成功；返回 0 表示查找到 key
-	res, err := renewalLua.Run(context.Background(), r.redisClient, []string{r.keyHashName}, goroutineId, r.lockLeaseTimeMs).Result()
+	keys := []string{r.keyHashName}
+	args := []interface{}{goroutineId, r.lockLeaseTimeMs}
+	res, err := r.redisClient.Eval(context.Background(), renewalLockLuaScript, keys, args...)
 	if err != nil {
 		return -1, err
 	}
@@ -440,7 +443,7 @@ func (r *RedisFairLock) tryRelease(requestId string, goroutineId int64, unlockLa
 	// 返回 0，表示当前协程解锁了，但是当前协程因为可重入，还没有删除锁
 	// 返回 1，表示当前协程解锁了，并且可重入次数用完，锁释放了
 	// 返回 0/1，都表示解锁了，所以不用区分，表示成功
-	_, err := releaseLua.Run(context.Background(), r.redisClient, keys, args...).Result()
+	_, err := r.redisClient.Eval(context.Background(), releaseLockLuaScript, keys, args...)
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return fmt.Errorf("attempt was made to unlock, but the goroutine did not hold the lock")
@@ -465,7 +468,7 @@ func (r *RedisFairLock) execForceReleaseLuaScript() error {
 	// 返回 0，表示当前协程未加锁，没有找到对应的 key
 	// 返回 1，表示当前协程加锁了，并且删除了对应的 key，完成强制解锁
 	// 返回 0/1，都完成了我们强制解锁的目标，所以不用区分
-	_, err := forceReleaseLua.Run(context.Background(), r.redisClient, keys, args...).Result()
+	_, err := r.redisClient.Eval(context.Background(), forceReleaseLockLuaScript, keys, args...)
 	if err != nil {
 		return err
 	}
@@ -473,13 +476,6 @@ func (r *RedisFairLock) execForceReleaseLuaScript() error {
 }
 
 func (r *RedisFairLock) isExistsFairLock() bool {
-	exists, err := r.redisClient.Exists(context.Background(), r.keyHashName).Result()
-	if err != nil {
-		// TODO 这里的错误需要返回
-		return false
-	}
-	if exists > 0 {
-		return true
-	}
-	return false
+	isExist, _ := r.redisClient.Exists(context.Background(), r.keyHashName)
+	return isExist
 }
