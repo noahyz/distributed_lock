@@ -12,12 +12,13 @@ type WrapRedisClient interface {
 	Eval(ctx context.Context, script string, keys []string, args ...interface{}) (interface{}, error)
 	LRange(ctx context.Context, key string, start, stop int64) ([]string, error)
 	ZRangeWithScores(ctx context.Context, key string, start, stop int64) (map[string]float64, error)
-	Exists(ctx context.Context, keys ...string) (bool, error)
-	Subscribe(ctx context.Context, channels ...string) WrapPubSub
+	Exists(ctx context.Context, key string) (bool, error)
+	GetPublishCommand() string
+	Subscribe(ctx context.Context, channel string) WrapPubSub
 	Close() error
 }
 type WrapPubSub interface {
-	Unsubscribe(ctx context.Context, channels ...string) error
+	Unsubscribe(ctx context.Context, channel string) error
 	Channel() <-chan string
 	Close() error
 }

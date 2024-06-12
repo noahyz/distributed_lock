@@ -58,8 +58,8 @@ func (r *RedisClient) ZRangeWithScores(ctx context.Context, key string, start, s
 	return result, nil
 }
 
-func (r *RedisClient) Exists(ctx context.Context, keys ...string) (bool, error) {
-	result, err := r.client.Exists(ctx, keys...).Result()
+func (r *RedisClient) Exists(ctx context.Context, key string) (bool, error) {
+	result, err := r.client.Exists(ctx, key).Result()
 	if err != nil {
 		return false, err
 	}
@@ -69,8 +69,12 @@ func (r *RedisClient) Exists(ctx context.Context, keys ...string) (bool, error) 
 	return false, nil
 }
 
-func (r *RedisClient) Subscribe(ctx context.Context, channels ...string) database.WrapPubSub {
-	pubSub := r.client.Subscribe(ctx, channels...)
+func (r *RedisClient) GetPublishCommand() string {
+	return "PUBLISH"
+}
+
+func (r *RedisClient) Subscribe(ctx context.Context, channel string) database.WrapPubSub {
+	pubSub := r.client.Subscribe(ctx, channel)
 	return NewPubSub(pubSub)
 }
 
@@ -95,8 +99,8 @@ func NewPubSub(redisPubSub *redis.PubSub) *PubSub {
 	return result
 }
 
-func (r *PubSub) Unsubscribe(ctx context.Context, channels ...string) error {
-	return r.redisPubSub.Unsubscribe(ctx, channels...)
+func (r *PubSub) Unsubscribe(ctx context.Context, channel string) error {
+	return r.redisPubSub.Unsubscribe(ctx, channel)
 }
 
 func (r *PubSub) Channel() <-chan string {
@@ -128,7 +132,7 @@ func getRedisFairLockClient(t *testing.T, lockName string) *RedisFairLock {
 	t.Helper()
 	client := redis.NewClient(&redis.Options{
 		Addr:     "127.0.0.1:6379",
-		Password: "123",
+		Password: "1234",
 		DB:       0,
 	})
 	redisClient := NewRedisClient(client)
@@ -140,7 +144,7 @@ func getRedisFairLockClient(t *testing.T, lockName string) *RedisFairLock {
 
 // TestLock 测试 Lock/UnLock 功能是否正常
 func TestLock(t *testing.T) {
-	lockName := "redis_fair_lock_test_name"
+	lockName := "redis_fair_lock_api"
 	redisFairLock := getRedisFairLockClient(t, lockName)
 	defer redisFairLock.Close()
 
@@ -163,7 +167,7 @@ func TestLock(t *testing.T) {
 
 // TestTryLock 测试 TryLock/UnLock 功能是否正常
 func TestTryLock(t *testing.T) {
-	lockName := "redis_fair_lock_test_name"
+	lockName := "redis_fair_tryLock_api"
 	redisFairLock := getRedisFairLockClient(t, lockName)
 	defer redisFairLock.Close()
 

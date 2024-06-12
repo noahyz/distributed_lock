@@ -29,7 +29,3 @@ func getLockName(uuid string, goroutineId int64) string {
 func getUnlockLatchName(requestId string) string {
 	return fmt.Sprintf("REDIS_DISTRIBUTED_LOCK_UNLOCK_LATCH_NMAE_%s", requestId)
 }
-
-func getPublishCommand() string {
-	return "PUBLISH"
-}

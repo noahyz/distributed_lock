@@ -9,7 +9,7 @@ import (
 	"github.com/noahyz/distributed_lock/api/option"
 	"github.com/noahyz/distributed_lock/pkg/utils"
 	cmap "github.com/orcaman/concurrent-map"
-	"github.com/redis/go-redis/v9"
+	"strings"
 	"time"
 )
 
@@ -318,7 +318,7 @@ func (r *RedisFairLock) runAcquireLockLuaScript(
 	result, err := r.redisClient.Eval(context.Background(), acquireLockLuaScript, keys, args...)
 	if err != nil {
 		// 加锁成功
-		if errors.Is(err, redis.Nil) {
+		if strings.Contains(err.Error(), "nil") {
 			return true, -1, nil
 		}
 		return false, -1, err
@@ -340,7 +340,7 @@ func (r *RedisFairLock) runOnceAcquireLockLuaScript(
 	_, err := r.redisClient.Eval(context.Background(), tryAcquireLockLuaScript, keys, args...)
 	if err != nil {
 		// 加锁成功
-		if errors.Is(err, redis.Nil) {
+		if strings.Contains(err.Error(), "nil") {
 			return true, nil
 		}
 		return false, err
@@ -435,7 +435,7 @@ func (r *RedisFairLock) tryRelease(requestId string, goroutineId int64, unlockLa
 		unlockLatchExpireTimeMs,
 		r.lockLeaseTimeMs,
 		utils.GetCurrentTimeMs(),
-		getPublishCommand(),
+		r.redisClient.GetPublishCommand(),
 		defaultUnlockChannelMessage,
 	}
 	// log.Printf("goroutine: %v, unlock start, channel name: %v", goroutineId, channelName)
@@ -445,7 +445,7 @@ func (r *RedisFairLock) tryRelease(requestId string, goroutineId int64, unlockLa
 	// 返回 0/1，都表示解锁了，所以不用区分，表示成功
 	_, err := r.redisClient.Eval(context.Background(), releaseLockLuaScript, keys, args...)
 	if err != nil {
-		if errors.Is(err, redis.Nil) {
+		if strings.Contains(err.Error(), "nil") {
 			return fmt.Errorf("attempt was made to unlock, but the goroutine did not hold the lock")
 		}
 		return err
@@ -461,7 +461,7 @@ func (r *RedisFairLock) execForceReleaseLuaScript() error {
 		getChannelPrefixName(r.fairLockName),
 	}
 	args := []interface{}{
-		getPublishCommand(),
+		r.redisClient.GetPublishCommand(),
 		defaultUnlockChannelMessage,
 		utils.GetCurrentTimeMs(),
 	}
